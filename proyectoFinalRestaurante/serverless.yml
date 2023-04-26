@@ -1,0 +1,254 @@
+service: proyectoFinalRestaurante
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.9
+
+#Rol Full privilegios
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action: "*"
+      Resource: "*"
+
+  #Servicio API Gateway
+functions:
+  pedidos:
+    handler: handler.pedidos
+    events:
+      - httpApi:
+          path: /my-path
+          method: GET
+      - httpApi:
+          path: /my-path
+          method: POST
+#desencadenadores lambda pedidos son GET y POST
+GetPedidosApi:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      StageName: dev
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          version: '1.0'
+          title: 'GetPedidosApi'
+        paths:
+          /pedidos/{id}:
+            get:
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations"
+                passthroughBehavior: "when_no_templates"
+                httpMethod: "POST"
+                type: "aws_proxy"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+              parameters:
+                - name: "id"
+                  in: "path"
+                  required: true
+                  type: "string"
+        definitions:
+          Empty:
+            type: "object"
+            title: "Empty Schema"
+    
+PostPedidosApi:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      StageName: dev
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          version: '1.0'
+          title: 'PostPedidosApi'
+        paths:
+          /pedidos:
+            post:
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations"
+                passthroughBehavior: "when_no_templates"
+                httpMethod: "POST"
+                type: "aws_proxy"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+              parameters:
+                - name: "body"
+                  in: "body"
+                  required: true
+                  schema:
+                    $ref: "#/definitions/Pedido"
+        definitions:
+          Empty:
+            type: "object"
+            title: "Empty Schema"
+          Pedido:
+            type: "object"
+            properties:
+              restaurante:
+                type: "string"
+              descripcion:
+                type: "string"
+              fecha:
+                type: "string"
+              cliente:
+                type: "string"
+            required:
+              - restaurante
+              - descripcion
+              - fecha
+              - cliente
+
+LambdaFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      CodeUri: ./
+      Handler: handler.pedidos
+      Runtime: python3.9
+      Events:
+        GetPedidos:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: GetPedidosApi
+            Path: /pedidos/{id}
+            Method: GET
+        PostPedidos:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: PostPedidosApi
+            Path: /pedidos
+            Method: POST
+          
+    MyDB:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        DBInstanceClass: db.t2.micro
+        DBName: pedidos
+        Engine: MySQL
+        EngineVersion: '5.7'
+        MasterUsername: admin
+        MasterUserPassword: admin123
+        AllocatedStorage: 20
+        MultiAZ: false
+        #descomentar cuando se cree la base de datos y el grupo y copiar el id del grupo
+        #VPCSecurityGroups:
+        #- sg-033a631d8ddca830f
+
+          #Grupo de seguridad base de datos
+    MyDBSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupName: GrupoSegVPN
+        GroupDescription: Security Group for my MySQL DB instance
+        #descomentar cuando cree la base de datos y copiar el id del vpc
+        VpcId: vpc-0f5e145af5d85af14
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 3306
+            ToPort: 3306
+            CidrIp: 0.0.0.0/0
+
+     #Servicio notificaciones
+    SNSTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: PedidosCorreo
+        TopicName: PedidosCorreo
+
+    #Politica Servicio de notificaciones
+    MySNSTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "lambda.amazonaws.com"
+              Action: "sns:Publish"
+              Resource:
+                Ref: "SNSTopic"
+        Topics:
+          - Ref: " SNSTopic"
+    #configurar salida de las lambdas con sns
+functions:
+  pedidos:
+    handler: handler.pedidos
+    events:
+      - sns:
+          topicName: "PedidosCorreo"
+
+  pedidosCola:
+    handler: handler.pedidosCola
+    events:
+      - sns:
+          topicName: "PedidosCorreo"
+
+
+    #Servicio Cola
+    MyQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: pedidosCola
+        DelaySeconds: 15
+
+    #Servicio Bucket
+    MyBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: bucketpedidos 
+
+    #politica bucket 
+    MyS3BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref bucketpedidos 
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:PutObject
+              Resource: !Sub arn:aws:s3:::bucketpedidos
+
+    #configurar salida de los lambdas para el bucket 
+functions:
+  pedidos:
+    handler: handler.pedidos
+    events:
+      - s3:
+          bucket: bucketpedidos 
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .txt
+
+  pedidosCola:
+    handler: handler.pedidosCola
+    events:
+      - s3:
+          bucket: bucketpedidos 
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .txt
+
+#desencadenador de la lambda pedidosCola es colaPedidos
+functions:
+  myFunction:
+    handler: handler.pedidosCola
+    events:
+      - sqs:
+          arn: arn:aws:sqs:us-east-2:232754358893:colaPedidos
+          batchSize: 1
+          enabled: true
+          maximumRetryAttempts: 5
+          retryDelay: 500
+ 
